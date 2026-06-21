@@ -44,6 +44,21 @@ func TestGetMissing(t *testing.T) {
 	}
 }
 
+func TestGetNonNumericIndexErrors(t *testing.T) {
+	// A malformed index must error, not silently resolve to the parent node.
+	v := decode(t, `{"data":[1,2,3]}`)
+	if _, err := Get(v, "data[x]"); err == nil {
+		t.Fatalf("expected error for non-numeric index")
+	}
+}
+
+func TestGetEmptyBracketsError(t *testing.T) {
+	v := decode(t, `{"data":[1,2,3]}`)
+	if _, err := Get(v, "data[]"); err == nil {
+		t.Fatalf("expected error for empty index brackets")
+	}
+}
+
 func TestProject(t *testing.T) {
 	v := decode(t, `{"id":"x","name":"n","secret":"s"}`)
 	got := Project(v, []string{"id", "name"})

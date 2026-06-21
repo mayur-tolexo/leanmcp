@@ -17,7 +17,10 @@ func Get(v any, path string) (any, error) {
 	}
 	cur := v
 	for _, seg := range strings.Split(path, ".") {
-		name, indices := parseSegment(seg)
+		name, indices, err := parseSegment(seg)
+		if err != nil {
+			return nil, fmt.Errorf("path %q: %w", path, err)
+		}
 		if name != "" {
 			m, ok := cur.(map[string]any)
 			if !ok {
@@ -56,20 +59,28 @@ func Project(v any, fields []string) map[string]any {
 }
 
 // parseSegment splits a segment like "data[1][2]" into its name and indices.
-func parseSegment(seg string) (string, []int) {
+// A malformed bracket group (empty or non-numeric) is an error rather than a
+// silently dropped index, which would otherwise resolve to the wrong node.
+func parseSegment(seg string) (string, []int, error) {
 	name := seg
 	var indices []int
 	if i := strings.IndexByte(seg, '['); i >= 0 {
 		name = seg[:i]
 		for _, part := range strings.Split(seg[i:], "[") {
-			part = strings.TrimSuffix(strings.TrimSpace(part), "]")
+			// The first split element is the text before the first '[' (empty here).
 			if part == "" {
 				continue
 			}
-			if n, err := strconv.Atoi(part); err == nil {
-				indices = append(indices, n)
+			if !strings.HasSuffix(part, "]") {
+				return "", nil, fmt.Errorf("malformed index segment %q", seg)
 			}
+			part = strings.TrimSpace(strings.TrimSuffix(part, "]"))
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return "", nil, fmt.Errorf("invalid array index %q", part)
+			}
+			indices = append(indices, n)
 		}
 	}
-	return name, indices
+	return name, indices, nil
 }

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,43 @@ func TestOptimizeOversizeFailsOpen(t *testing.T) {
 	}
 	if out.Text != string(raw) {
 		t.Fatalf("oversize must return full raw")
+	}
+}
+
+func bigObject() []byte {
+	// A large single JSON object: heavy by token count but not an array, so the
+	// tabular transform cannot apply.
+	var b strings.Builder
+	b.WriteByte('{')
+	for i := 0; i < 200; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`"key`)
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(`":"some-fairly-long-value-string"`)
+	}
+	b.WriteByte('}')
+	return []byte(b.String())
+}
+
+func TestOptimizeHeavyButUncompactablePassesThrough(t *testing.T) {
+	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	raw := bigObject()
+	out, err := o.process(context.Background(), "credA", "obj-tool", raw)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	// Compaction did not apply, so the returned text must never exceed the
+	// original (no trailer appended, no handle, no enlargement).
+	if out.Compacted || out.Handle != "" {
+		t.Fatalf("uncompactable heavy result must not issue a handle: %+v", out)
+	}
+	if out.Text != string(raw) {
+		t.Fatalf("uncompactable result must pass through unchanged")
+	}
+	if len(out.Text) > len(raw) {
+		t.Fatalf("returned payload must never be larger than original")
 	}
 }
 

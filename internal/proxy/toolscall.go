@@ -46,6 +46,13 @@ func (o *optimizer) process(ctx context.Context, credHash, tool string, raw []by
 	}
 	res := compact.Compact(raw, compact.Options{Mode: mode})
 
+	// If no transform shrank the payload, pass the full result through untouched.
+	// Appending a trailer here would make the returned text larger than the
+	// original for no compaction benefit, violating the never-enlarge guarantee.
+	if !res.Applied {
+		return outcome{Text: string(raw)}, nil
+	}
+
 	// Refuse to cache payloads that exceed the configured hard size limit; return
 	// the full raw so the caller still gets a valid (if large) response.
 	if len(raw) > o.cfg.MaxRawBytes {

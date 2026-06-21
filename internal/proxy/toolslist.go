@@ -22,6 +22,11 @@ func paginate(all []*mcp.Tool, cursor string, pageSize int) ([]*mcp.Tool, string
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cursor offset value: %w", err)
 		}
+		// A negative offset can only come from a corrupted or forged cursor;
+		// reject it rather than panic on a negative slice bound below.
+		if offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor: negative offset %d", offset)
+		}
 	}
 
 	// Clamp offset so it never exceeds the list length.

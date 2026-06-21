@@ -19,9 +19,10 @@ type ExpandArgs struct {
 }
 
 // expand loads the cached entry for args.Handle, requires it to be bound to
-// credHash, applies path/fields selection, and returns the selected JSON string.
-// A missing handle and a credential mismatch return the same error to avoid
-// leaking handle existence to callers with a different credential.
+// credHash, applies path then fields then offset/limit selection, and returns
+// the selected JSON string. A missing handle and a credential mismatch return
+// the same error to avoid leaking handle existence to callers with a different
+// credential.
 func expand(ctx context.Context, s store.Store, credHash string, args ExpandArgs) (string, error) {
 	e, err := s.Get(ctx, args.Handle)
 	if err != nil {

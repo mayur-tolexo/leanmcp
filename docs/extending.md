@@ -48,7 +48,6 @@ import (
     "context"
     "crypto/rand"
     "encoding/hex"
-    "errors"
     "sync"
     "time"
 
@@ -61,9 +60,9 @@ type expiringEntry struct {
     expiresAt time.Time
 }
 
-// MapStore is a minimal in-process Store backed by a sync.Map. It is suitable
-// for single-instance deployments or testing; it does not share state across
-// replicas.
+// MapStore is a minimal in-process Store backed by a mutex-guarded map. It is
+// suitable for single-instance deployments or testing; it does not share state
+// across replicas.
 type MapStore struct {
     mu sync.Mutex
     m  map[string]expiringEntry

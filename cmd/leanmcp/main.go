@@ -4,9 +4,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/mayur-tolexo/leanmcp/internal/config"
@@ -73,6 +76,24 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Printf("leanmcp listening on %s (upstream %s)", cfg.ListenAddr, cfg.UpstreamMCPURL)
-	log.Fatal(httpSrv.ListenAndServe())
+	// Serve in the background and shut down gracefully on SIGINT/SIGTERM so
+	// in-flight requests can drain (Kubernetes sends SIGTERM before pod removal).
+	go func() {
+		log.Printf("leanmcp listening on %s (upstream %s)", cfg.ListenAddr, cfg.UpstreamMCPURL)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	stop()
+	log.Println("shutting down; draining in-flight requests")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+	}
 }

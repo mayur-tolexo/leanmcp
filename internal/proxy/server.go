@@ -80,7 +80,12 @@ func handleList(ctx context.Context, up *upstream.Client, req mcp.Request) (mcp.
 		return nil, err
 	}
 
-	merged := append(tools, expandToolDef)
+	// Build the merged list in a freshly allocated slice. Appending directly to
+	// the slice returned by ListTools could mutate its backing array if it has
+	// spare capacity, so copy into a new slice sized for the extra tool.
+	merged := make([]*mcp.Tool, 0, len(tools)+1)
+	merged = append(merged, tools...)
+	merged = append(merged, expandToolDef)
 
 	cursor := ""
 	if lr != nil && lr.Params != nil {
@@ -95,8 +100,12 @@ func handleList(ctx context.Context, up *upstream.Client, req mcp.Request) (mcp.
 
 // handleCall proxies a tools/call to the upstream. The expand_result tool is
 // delegated to its registered handler via next. Other tools are called upstream
-// (forwarding the inbound header), and their first text result is run through the
-// optimizer before being returned as a single-text CallToolResult.
+// (forwarding the inbound header). An upstream tool-level error result is passed
+// back unchanged so the model can see and self-correct on it; otherwise the
+// result's first text block is run through the optimizer. When the optimizer
+// compacts, a single compacted text block is returned; when it does not, the
+// upstream result is returned unchanged so non-text and multi-block content
+// survive intact.
 func handleCall(ctx context.Context, up *upstream.Client, opt *optimizer, cacheSecret string,
 	next mcp.MethodHandler, method string, req mcp.Request) (mcp.Result, error) {
 	cr, ok := req.(*mcp.CallToolRequest)
@@ -124,13 +133,32 @@ func handleCall(ctx context.Context, up *upstream.Client, opt *optimizer, cacheS
 		return nil, err
 	}
 
+	// A tool-level error from the upstream must be relayed verbatim. Compacting
+	// or caching an error payload would both lie about success and hand back an
+	// expand handle for an error string, so return it untouched.
+	if res == nil || res.IsError {
+		return res, nil
+	}
+
 	raw := firstText(res)
 	credHash := cred.HMAC(cacheSecret, bearerFromExtra(cr.Extra))
 	oc, err := opt.process(ctx, credHash, name, []byte(raw))
 	if err != nil {
 		return nil, err
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: oc.Text}}}, nil
+
+	// When nothing was compacted, return the upstream result unchanged so image,
+	// resource, structured and multi-block content are preserved losslessly.
+	if !oc.Compacted {
+		return res, nil
+	}
+
+	// Compaction applied: replace the content with the single compacted text
+	// block carrying the expand_result trailer, preserving any structured output.
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: oc.Text}},
+		StructuredContent: res.StructuredContent,
+	}, nil
 }
 
 // withInboundHeader threads the inbound HTTP header carried on the server request

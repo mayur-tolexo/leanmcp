@@ -38,11 +38,25 @@ For each tool call, leanmcp forwards to the upstream, inspects the result, and:
   injected `expand_result` tool. The full raw result is cached in Redis behind an
   identity-scoped handle with a short TTL.
 
-```
-Client ──MCP──▶ leanmcp ──MCP(+caller PAT)──▶ upstream MCP ──▶ backends
-                   │  small result: pass through unchanged
-                   │  heavy result: compact view + handle ──▶ Redis(raw, short TTL)
-Client ──expand_result(handle, path?, …)──▶ leanmcp ──▶ Redis ──▶ requested slice
+```mermaid
+flowchart LR
+    Client["MCP client"]
+    subgraph leanmcp
+        Proxy["proxy + compaction"]
+        Redis[("Redis<br/>raw result, short TTL")]
+    end
+    Upstream["upstream MCP server"]
+    Backends["backends"]
+
+    Client -->|MCP tools/call| Proxy
+    Proxy -->|forward + caller auth| Upstream
+    Upstream --> Backends
+    Upstream -->|full result| Proxy
+    Proxy -->|small: pass through| Client
+    Proxy -->|heavy: compact view + handle| Client
+    Proxy -->|cache full raw| Redis
+    Client -->|expand_result handle, path?| Proxy
+    Redis -->|requested slice| Proxy
 ```
 
 ### 3.1 Why a separate, generic service
@@ -59,6 +73,36 @@ Client ──expand_result(handle, path?, …)──▶ leanmcp ──▶ Redis 
 | `tools/list` | Fetch the **full** upstream list, append the wrapper-owned `expand_result` tool, and **re-paginate locally** under leanmcp's own cursor. Upstream cursors are never passed through after a merge (see §8.2). |
 | `tools/call` → `expand_result` | Handled **locally** from Redis. Never forwarded. |
 | `tools/call` → any other tool | Forward (with caller auth) → receive full result → classify → pass through if small, else compact + cache + trailer. |
+
+### 4.1 `tools/call` sequence
+
+```mermaid
+sequenceDiagram
+    participant C as MCP client
+    participant L as leanmcp
+    participant A as auth verify
+    participant U as upstream MCP
+    participant R as Redis
+
+    C->>L: tools/call (name, args, credential)
+    L->>A: verify credential
+    A-->>L: org, user (or reject)
+    L->>U: forward call (+ credential)
+    U-->>L: full result
+    alt result below threshold
+        L-->>C: full result (unchanged)
+    else heavy result
+        L->>L: lossless compaction
+        L->>R: SET org:user:nonce = raw (short TTL)
+        Note over L,R: on Redis/oversize failure → return full result, no handle
+        L-->>C: compact view + expand trailer
+        C->>L: expand_result(handle, path?)
+        L->>A: re-verify credential
+        L->>R: GET handle
+        R-->>L: raw result
+        L-->>C: requested slice
+    end
+```
 
 ## 5. Components
 

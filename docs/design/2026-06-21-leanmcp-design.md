@@ -202,7 +202,8 @@ shadow_mode: true                   # compact AND return full; log would-be savi
 tools:
   some-list-tool:
     compaction: tabular
-    array: { path: data, max_items: 50 }   # cap is lossy → recoverable via expand offset/limit
+    array_path: data        # dot-path to the dominant array (consumed by the array-cap stage)
+    max_items: 50           # cap is lossy → recoverable via expand offset/limit
     # projection is OPT-IN and OFF by default; enable only after telemetry shows low expand rate
     keep_fields: [id, name, status]        # optional, lossy
 ```

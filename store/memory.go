@@ -50,8 +50,9 @@ func (m *memStore) Put(_ context.Context, credHash string, raw []byte, ttlSecond
 	return handle, nil
 }
 
-// Get retrieves the entry for handle, deletes it if expired, and returns
-// ErrNotFound when the handle is missing or the TTL has elapsed.
+// Get retrieves the entry for handle and returns ErrNotFound when the handle is
+// missing or the TTL has elapsed. Expired entries are deleted on access.
+// Entries are readable multiple times until they expire.
 func (m *memStore) Get(_ context.Context, handle string) (*Entry, error) {
 	m.mu.Lock()
 	item, ok := m.items[handle]
@@ -59,14 +60,13 @@ func (m *memStore) Get(_ context.Context, handle string) (*Entry, error) {
 		m.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	// Delete the item regardless of expiry so each handle is single-use or
-	// cleaned up on first access after expiry.
-	delete(m.items, handle)
-	m.mu.Unlock()
-
 	if time.Now().After(item.expiresAt) {
+		// Remove the expired entry so subsequent calls see ErrNotFound immediately.
+		delete(m.items, handle)
+		m.mu.Unlock()
 		return nil, ErrNotFound
 	}
+	m.mu.Unlock()
 
 	// Return a copy of the entry to prevent callers from mutating stored data.
 	entryCopy := item.entry

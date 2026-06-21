@@ -1,0 +1,16 @@
+# leanmcp example configuration. Environment variables (LEANMCP_*) override these.
+upstream_mcp_url: http://upstream-mcp:8080/mcp
+cache_secret: change-me-in-production   # HMAC key binding expand handles to the caller credential
+store:
+  type: redis                           # memory | redis
+  redis_url: redis://redis:6379
+optimize_threshold_tokens: 1500         # below this many estimated tokens, never optimize
+expand_ttl: 10m
+max_raw_bytes: 5000000
+shadow_mode: true                       # compact AND return full result; measure before enabling handle-only
+listen_addr: ":8080"
+tools:
+  list_items:
+    compaction: tabular
+    array_path: data
+    max_items: 50

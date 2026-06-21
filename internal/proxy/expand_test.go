@@ -43,3 +43,39 @@ func TestExpandMissingHandle(t *testing.T) {
 		t.Fatalf("expected error for missing handle")
 	}
 }
+
+func TestExpandOffsetLimitPagesArray(t *testing.T) {
+	s := store.NewMemory()
+	ctx := context.Background()
+	h, _ := s.Put(ctx, "credA", []byte(`{"data":[0,1,2,3,4]}`), 60)
+	// Page the inner array via path + offset/limit.
+	out, err := expand(ctx, s, "credA", ExpandArgs{Handle: h, Path: "data", Offset: 1, Limit: 2})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if strings.TrimSpace(out) != `[1,2]` {
+		t.Fatalf("offset/limit slice = %s, want [1,2]", out)
+	}
+}
+
+func TestExpandOffsetLimitClampsBounds(t *testing.T) {
+	s := store.NewMemory()
+	ctx := context.Background()
+	h, _ := s.Put(ctx, "credA", []byte(`[10,20,30]`), 60)
+	// Offset past the end yields an empty page, not an error or panic.
+	out, err := expand(ctx, s, "credA", ExpandArgs{Handle: h, Offset: 99, Limit: 5})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if strings.TrimSpace(out) != `[]` {
+		t.Fatalf("out-of-range offset = %s, want []", out)
+	}
+	// Limit larger than the remainder returns the remainder.
+	out, err = expand(ctx, s, "credA", ExpandArgs{Handle: h, Offset: 1, Limit: 99})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if strings.TrimSpace(out) != `[20,30]` {
+		t.Fatalf("clamped limit = %s, want [20,30]", out)
+	}
+}

@@ -63,6 +63,45 @@ func (h *headerForwardingTransport) RoundTrip(req *http.Request) (*http.Response
 
 ---
 
+## Revisions (2026-06-21, post-review — AUTHORITATIVE, supersede later sections)
+
+These decisions override any conflicting code in the per-task sections below. The design
+doc (`docs/design/2026-06-21-leanmcp-design.md`) is the source of truth.
+
+1. **No identity verifier.** Phase 4 ("Identity verifier") is **removed**. leanmcp never
+   verifies or interprets the credential; it forwards it upstream unchanged. Delete all
+   `internal/identity` references and the `verify_endpoint` config.
+
+2. **Credential-hash handle binding.** A new tiny package `internal/cred` exposes
+   `HMAC(secret, credential string) string` (hex HMAC-SHA256). Each cache entry stores
+   this hash; `expand_result` is honored only when the caller's credential hashes to the
+   stored value. Replaces identity/org/user entirely.
+
+3. **`store` is a PUBLIC package** (top-level `store/`, not `internal/store/`) so companies
+   can implement their own backend and pass it to the server. Update all import paths from
+   `github.com/mayur-tolexo/leanmcp/internal/store` → `github.com/mayur-tolexo/leanmcp/store`.
+
+4. **Store interface (revised signatures):**
+   ```go
+   type Entry struct { CredHash string `json:"cred_hash"`; Raw []byte `json:"raw"`; CreatedAt int64 `json:"created_at"` }
+   type Store interface {
+       Put(ctx context.Context, credHash string, raw []byte, ttlSeconds int) (handle string, err error)
+       Get(ctx context.Context, handle string) (*Entry, error)
+   }
+   ```
+   The handle is a random nonce (no `org:user` namespacing — binding is via `CredHash`).
+   Add `store.New(typ, redisURL string) (Store, error)` selecting `"memory"`/`"redis"`.
+
+5. **Config (revised):** drop `VerifyEndpoint`; add `CacheSecret string` (env
+   `LEANMCP_CACHE_SECRET`) and a `Store struct { Type, RedisURL string }` (env
+   `LEANMCP_STORE_TYPE`, `LEANMCP_REDIS_URL`). Implement as the first task of Phase 3.
+
+6. **Proxy wiring (revised):** `proxy.NewServer(cfg, up, store.Store, cacheSecret string)`
+   — no verifier param. The middleware reads the `Authorization` header from the request
+   (`req.Extra.Header`), computes `cred.HMAC(cacheSecret, credential)`, and threads that
+   hash to the optimizer/expand. `expand(ctx, store, credHash, args)` compares
+   `entry.CredHash == credHash`. `process(ctx, credHash, tool, raw)` stores with the hash.
+
 ## File structure
 
 ```
@@ -72,12 +111,11 @@ internal/tokens/estimate.go      cheap token estimate + threshold check
 internal/jsonpath/jsonpath.go    dot-path get + field projection (for expand)
 internal/compact/compact.go      Compactor: dispatch by mode, Result type
 internal/compact/tabular.go      lossless tabular transform
-internal/store/store.go          Store interface + Entry + handle keying
-internal/store/memory.go         in-memory Store (tests / single-node)
-internal/store/redis.go          Redis Store
-internal/identity/identity.go    Verifier interface + Identity
-internal/identity/static.go      static/dev verifier
-internal/identity/http.go        HTTP verify-endpoint verifier
+store/store.go                   Store interface + Entry (PUBLIC, importable)
+store/memory.go                  in-memory Store (tests / single-node)
+store/redis.go                   Redis Store
+store/factory.go                 New(type, redisURL) backend selector
+internal/cred/cred.go            HMAC(secret, credential) for handle binding
 internal/upstream/transport.go   header-forwarding RoundTripper + ctx plumbing
 internal/upstream/client.go      upstream MCP client wrapper (ListTools/CallTool)
 internal/proxy/server.go         build *mcp.Server + receiving middleware
@@ -1239,7 +1277,94 @@ git commit -m "feat: add redis store"
 
 ---
 
-# Phase 4 — Identity verifier
+# Phase 4 — Credential binding
+
+> ⚠️ **SUPERSEDED CONTENT BELOW — DO NOT IMPLEMENT the identity verifier.** Per Revisions
+> #1/#2, this phase is replaced by a single tiny package. The old verifier tasks (4.1, 4.2)
+> are kept only for history; skip them.
+
+**Goal:** Provide `internal/cred.HMAC(secret, credential string) string` (hex HMAC-SHA256)
+used to bind cache handles to the caller's credential. No identity, no verification.
+
+### Task 4.0: Credential HMAC helper
+
+**Files:**
+- Create: `internal/cred/cred.go`
+- Test: `internal/cred/cred_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+package cred
+
+import "testing"
+
+func TestHMACStableAndKeyed(t *testing.T) {
+	a := HMAC("secret", "tok")
+	if a == "" {
+		t.Fatalf("empty hmac")
+	}
+	if a != HMAC("secret", "tok") {
+		t.Fatalf("HMAC must be deterministic")
+	}
+	if a == HMAC("other-secret", "tok") {
+		t.Fatalf("HMAC must depend on the secret")
+	}
+	if a == HMAC("secret", "different") {
+		t.Fatalf("HMAC must depend on the credential")
+	}
+}
+
+func TestHMACEmptyCredential(t *testing.T) {
+	// Empty credential is allowed (unauthenticated upstream); must be stable.
+	if HMAC("secret", "") != HMAC("secret", "") {
+		t.Fatalf("empty-credential HMAC must be stable")
+	}
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `go test ./internal/cred/ -v`
+Expected: FAIL — `undefined: HMAC`.
+
+- [ ] **Step 3: Implement**
+
+```go
+// Package cred derives a keyed hash of a caller credential, used solely to bind
+// cache handles so a handle can be redeemed only by the same credential.
+package cred
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+)
+
+// HMAC returns the hex HMAC-SHA256 of credential keyed by secret. The credential
+// itself is never stored or logged; only this hash is.
+func HMAC(secret, credential string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(credential))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `go test ./internal/cred/ -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/cred/
+git commit -m "feat: add credential HMAC helper for handle binding"
+```
+
+---
+
+## Superseded (historical) — original identity verifier
 
 **Goal:** Derive a trustworthy `(org, user)` from the caller's credential, used only to namespace handles. Pluggable: a static dev verifier and an HTTP verify-endpoint verifier.
 

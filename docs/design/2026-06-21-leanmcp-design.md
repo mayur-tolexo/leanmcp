@@ -1,7 +1,7 @@
 # leanmcp — Design
 
 **Date:** 2026-06-21
-**Status:** Approved design, pre-implementation
+**Status:** Approved design, implemented
 **Module:** `github.com/mayur-tolexo/leanmcp`
 
 ## 1. Problem
@@ -35,15 +35,20 @@ For each tool call, leanmcp forwards to the upstream, inspects the result, and:
 - **passes small results through untouched** (only optimize "where usage is maximum"), or
 - for **heavy** results, returns a **compact, losslessly-transformed view** plus a
   trailer telling the model it can retrieve the full payload — or a sub-path — via an
-  injected `expand_result` tool. The full raw result is cached in Redis behind an
-  identity-scoped handle with a short TTL.
+  injected `expand_result` tool. The full raw result is cached in a pluggable store
+  behind a short-TTL handle **bound to a keyed hash of the caller's credential**.
+
+leanmcp **does not verify or interpret the credential** — it forwards it to the upstream
+unchanged (the upstream remains the sole auth/authz authority). The credential hash is
+used only to gate `expand_result`: a handle can be redeemed only by presenting the same
+credential that created it (see §8.1).
 
 ```mermaid
 flowchart LR
     Client["MCP client"]
     subgraph leanmcp
         Proxy["proxy + compaction"]
-        Redis[("Redis<br/>raw result, short TTL")]
+        Store[("pluggable store<br/>raw result + cred-hash, short TTL")]
     end
     Upstream["upstream MCP server"]
     Backends["backends"]
@@ -54,16 +59,18 @@ flowchart LR
     Upstream -->|full result| Proxy
     Proxy -->|small: pass through| Client
     Proxy -->|heavy: compact view + handle| Client
-    Proxy -->|cache full raw| Redis
+    Proxy -->|cache raw + cred-hash| Store
     Client -->|expand_result handle, path?| Proxy
-    Redis -->|requested slice| Proxy
+    Store -->|requested slice| Proxy
 ```
 
 ### 3.1 Why a separate, generic service
 - Truly "no changes to existing APIs" — it is pure infrastructure in front of any MCP server.
 - Reusable beyond any single platform (works with any MCP server, not provider-specific).
+- Because it never interprets the credential, it works with **any company's auth system**
+  with zero integration.
 - Reuses well-understood building blocks: official MCP go-sdk, Streamable HTTP, a
-  context-forwarding `http.RoundTripper`, Redis.
+  context-forwarding `http.RoundTripper`, a pluggable store (Redis reference impl).
 
 ## 4. Per-method behavior
 
@@ -80,26 +87,23 @@ flowchart LR
 sequenceDiagram
     participant C as MCP client
     participant L as leanmcp
-    participant A as auth verify
     participant U as upstream MCP
-    participant R as Redis
+    participant S as store
 
     C->>L: tools/call (name, args, credential)
-    L->>A: verify credential
-    A-->>L: org, user (or reject)
-    L->>U: forward call (+ credential)
+    L->>U: forward call (+ credential, unchanged)
     U-->>L: full result
     alt result below threshold
         L-->>C: full result (unchanged)
     else heavy result
-        L->>L: lossless compaction
-        L->>R: SET org:user:nonce = raw (short TTL)
-        Note over L,R: on Redis/oversize failure → return full result, no handle
-        L-->>C: compact view + expand trailer
-        C->>L: expand_result(handle, path?)
-        L->>A: re-verify credential
-        L->>R: GET handle
-        R-->>L: raw result
+        L->>L: lossless compaction + h = HMAC(secret, credential)
+        L->>S: SET nonce = {raw, h} (short TTL)
+        Note over L,S: on store/oversize failure → return full result, no handle
+        L-->>C: compact view + expand trailer (handle = nonce)
+        C->>L: expand_result(handle, path?) (+ credential)
+        L->>S: GET handle
+        S-->>L: {raw, h}
+        L->>L: require HMAC(secret, credential) == h
         L-->>C: requested slice
     end
 ```
@@ -117,11 +121,13 @@ injected with a custom `http.RoundTripper` that reads the caller's credential fr
 context and attaches it to the outgoing request — the pattern shown in the go-sdk's own
 `examples/server/proxy`. The upstream still performs all of its own auth/authz.
 
-### 5.3 Auth / identity (revised — see §8.1)
-leanmcp **verifies** the caller's credential against the configured auth endpoint
-(pluggable; e.g. a PAT verify call) to obtain a trustworthy identity (`org`, `user`).
-That identity is used **only** to namespace cache handles. The original credential is
-also forwarded upstream unchanged. leanmcp adds no new authorization decisions.
+### 5.3 Credential binding (no verification — see §8.1)
+leanmcp does **not** verify or interpret the credential. It reads the inbound
+`Authorization` header, forwards it to the upstream unchanged, and computes
+`HMAC(cache_secret, credential)` purely to **bind cache handles**. The hash is stored
+with the cached entry; `expand_result` is honored only when the caller presents a
+credential whose hash matches. This needs no per-company auth integration and makes no
+authorization decisions — the upstream remains the sole authority.
 
 ### 5.4 Result classifier ("where usage is maximum")
 Estimates result token cost (char-count ÷ ~4, or a real tokenizer) and compares against
@@ -139,10 +145,13 @@ Config-driven via `leanmcp.yaml`, keyed by upstream tool name. v1 modes:
 All v1 transforms are **lossless**: every field and item is preserved either in the
 compact view or reconstructable from it. No data is dropped without a handle to recover it.
 
-### 5.6 Reference store (Redis)
-- Key: `org:user:nonce`. Value: full raw result.
-- **Short TTL** (default 5–15 min), `volatile-ttl`/`allkeys-lru` eviction.
-- `MAX_RAW_BYTES` per handle. Oversized payloads are **not** cached (see §7).
+### 5.6 Pluggable store (Redis reference impl)
+The store is an interface (see §14); Redis is the reference implementation, with an
+in-memory impl for tests/single-node. A company can supply its own (S3, an internal
+cache, a DB) by implementing two methods.
+- Key: random `nonce` (the handle). Value: `{raw, cred_hash, created_at}`.
+- **Short TTL** (default 5–15 min); Redis impl uses `volatile-ttl`/`allkeys-lru` eviction.
+- `max_raw_bytes` per handle. Oversized payloads are **not** cached (see §7).
 
 ### 5.7 Injected `expand_result` tool
 ```jsonc
@@ -158,10 +167,11 @@ compact view or reconstructable from it. No data is dropped without a handle to 
   }
 }
 ```
-Loads raw from Redis (after re-verifying caller identity, §8.1), applies
-`path`/`fields`/`offset`/`limit`, returns the slice (re-compacted if still huge, same
-handle reusable). Missing/expired handle → clear error: "result expired, re-run the
-original tool."
+Loads raw from the store, requires `HMAC(cache_secret, caller_credential)` to equal the
+entry's stored hash (§8.1), then applies `path`/`fields`/`offset`/`limit` and returns the
+slice (re-compacted if still huge, same handle reusable). Missing/expired handle or a
+credential-hash mismatch → the same clear error: "result expired, re-run the original
+tool" (mismatch is not distinguished, to avoid leaking handle existence).
 
 ### 5.8 Compact-result trailer
 A small machine-readable footer so the model knows expansion exists, e.g.:
@@ -177,11 +187,14 @@ A small machine-readable footer so the model knows expansion exists, e.g.:
 ```yaml
 version: 1
 upstream_mcp_url: ${UPSTREAM_MCP_URL}
-redis_url:        ${REDIS_URL}
-optimize_threshold_tokens: 1500   # below this, never optimize
+cache_secret:     ${CACHE_SECRET}   # HMAC key for credential binding
+store:
+  type: redis                       # redis | memory (factory-selected, §14)
+  redis_url: ${REDIS_URL}
+optimize_threshold_tokens: 1500     # below this, never optimize
 expand_ttl: 10m
 max_raw_bytes: 5_000_000
-shadow_mode: true                 # compact AND return full; log would-be savings
+shadow_mode: true                   # compact AND return full; log would-be savings
 ```
 
 ### 6.2 Per-tool
@@ -189,7 +202,8 @@ shadow_mode: true                 # compact AND return full; log would-be saving
 tools:
   some-list-tool:
     compaction: tabular
-    array: { path: data, max_items: 50 }   # cap is lossy → recoverable via expand offset/limit
+    array_path: data        # dot-path to the dominant array (consumed by the array-cap stage)
+    max_items: 50           # cap is lossy → recoverable via expand offset/limit
     # projection is OPT-IN and OFF by default; enable only after telemetry shows low expand rate
     keep_fields: [id, name, status]        # optional, lossy
 ```
@@ -203,18 +217,25 @@ Every failure preserves correctness by returning the **full result**:
 | Redis down / write fails | Return full result, **no handle issued**. |
 | Payload > `max_raw_bytes` | Return full result, **no handle** (never issue a handle with no backing data). |
 | Upstream error | Pass through untouched — never optimize errors. |
-| Auth verify fails | Reject before any upstream call. |
-| `expand_result` handle missing/expired | Clear error: "result expired, re-run the original tool." |
-| Credential revoked after handle created | Reject expand (revocation-time guard + re-verify on expand). |
+| `expand_result` handle missing/expired/cred-hash mismatch | Same clear error: "result expired, re-run the original tool." |
+| No credential present (unauthenticated upstream) | Bind to the empty-credential hash; handles are shared, acceptable since there are no secrets to protect. |
 
 ## 8. Hard parts (from design review) and resolutions
 
-### 8.1 Multi-tenancy / handle isolation — CRITICAL
-An "auth-transparent, never verify" proxy has no trustworthy identity to namespace
-handles by, so a leaked/observed handle could be expanded by another caller.
-**Resolution:** leanmcp verifies the credential to derive `org`/`user`, namespaces
-handles as `org:user:nonce`, re-verifies on `expand_result`, and rejects handles created
-before a credential's revocation time. Auth is *forwarded* upstream, not *skipped*.
+### 8.1 Handle isolation without verification — CRITICAL
+A handle returned to the model could be observed and redeemed by another caller, leaking
+one caller's cached data to another. An earlier approach verified the credential to derive
+an `org/user` namespace — but that drags per-company auth integration into a proxy that
+otherwise interprets nothing. **Resolution:** bind each handle to `HMAC(cache_secret,
+credential)` and require a matching credential on `expand_result`. The security argument:
+**the cache grants no access the credential didn't already have** — the cached data is a
+subset of what that exact credential just fetched from upstream, and anyone holding the
+credential could simply call the original tool again. So "redeem only with the same
+credential" is the correct boundary and is strictly weaker than the credential's own
+power. The short TTL bounds the post-revocation window (a revoked-but-known credential
+string could redeem a still-cached handle until it expires; acceptable for minutes-scale
+TTLs, and the data is again only what that credential already saw). This needs no auth
+integration and works with any upstream auth scheme.
 
 ### 8.2 `tools/list` cursor pagination — HIGH
 Upstream paginates with opaque offset/limit cursors; appending `expand_result` to a
@@ -259,8 +280,9 @@ is the floor: ~50% on heavy responses with effectively no downside.
 
 Prometheus metrics, per-tool labels: `result_bytes_original`, `result_bytes_compacted`,
 `compaction_ratio`, `expand_total` / **expand_rate** (key tuning + shadow-mode signal),
-`fallback_total{reason}`, `redis_latency`, `added_latency`. Audit log on every
-`expand_result`: `(org, user, handle, outcome)`.
+`fallback_total{reason}`, `store_latency`, `added_latency`. Audit log on every
+`expand_result`: `(cred_hash_prefix, handle, outcome)` — the credential hash prefix, never
+the credential itself.
 
 ## 11. Rollout
 
@@ -271,12 +293,28 @@ Prometheus metrics, per-tool labels: `result_bytes_original`, `result_bytes_comp
 
 ## 12. Deployment
 
-Standalone service; container + K8s Deployment/Service. Multi-replica (state lives in
-Redis), pre-stop drain. New infra: a Redis instance and egress access to Redis + the
-upstream MCP + the auth-verify endpoint. Config via env / `leanmcp.yaml`.
+Standalone service; container + K8s Deployment/Service. Multi-replica (state lives in the
+store), pre-stop drain. New infra: a store backend (Redis by default) and egress access to
+it + the upstream MCP. `cache_secret` provided as a secret. Config via env / `leanmcp.yaml`.
 
 ## 13. Open questions
 
-- Pluggable auth-verify: ship a generic interface plus one reference implementation.
 - Tokenizer choice for the classifier (heuristic vs. exact) — start heuristic.
 - Whether `expand_result` results should themselves be compactable (recursion) or always raw.
+
+## 14. Extensibility
+
+The two integration seams are **public, importable** Go packages with narrow,
+dependency-free interfaces, so a company can integrate by implementing one of them and
+either configuring it or constructing the server as a library.
+
+- **Store** (`store.Store`): `Put(ctx, credHash, raw, ttl) → handle` and
+  `Get(ctx, handle) → Entry`. Reference impls: `memory`, `redis`. A `type` string in
+  config selects the backend via a small factory; bring-your-own backends (S3, internal
+  cache, DB) implement these two methods.
+- **Server construction** (`proxy.NewServer`): accepts the `Store` (and upstream client)
+  as parameters, so a library user passes their own implementation directly — no fork.
+
+Auth is intentionally **not** a seam: leanmcp never interprets the credential, so there is
+nothing company-specific to plug in (this replaced the earlier `Verifier` interface; see
+§8.1). A `docs/extending.md` guide shows a minimal custom `Store`.

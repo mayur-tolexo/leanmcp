@@ -37,15 +37,61 @@ Client ──expand_result(handle, path?)──▶ leanmcp ──▶ Redis ─�
 - **Lossless first.** v1 compaction never drops data without a handle to recover it.
   LLM summarization is deliberately excluded (roughly break-even on tokens, adds latency).
 - **No API changes.** Pure infrastructure in front of any MCP server.
-- **Fail open.** Any internal failure (Redis down, oversized payload, etc.) returns the
+- **Fail open.** Any internal failure (store down, oversized payload, etc.) returns the
   full, correct result — optimization is best-effort, never a correctness risk.
-- **Identity-scoped.** Cache handles are namespaced to a verified caller identity so a
-  handle can never be expanded by another caller.
+- **Credential-bound handles.** A cache handle is bound to a keyed hash of the caller's
+  credential and can be redeemed only by presenting the same credential — so a leaked
+  handle is useless to anyone else. leanmcp never verifies or interprets the credential
+  (it just forwards it upstream), so it works with any auth system out of the box.
+- **Pluggable storage.** The cache is a narrow `Store` interface (Redis + in-memory
+  reference impls); bring your own backend by implementing two methods.
+
+## Run it
+
+**Required environment variables:**
+
+| Variable | Description |
+|---|---|
+| `LEANMCP_UPSTREAM_MCP_URL` | URL of the upstream MCP server (e.g. `http://upstream:8080/mcp`) |
+| `LEANMCP_CACHE_SECRET` | HMAC key that binds expand handles to the caller credential — use a random string in production |
+
+**Optional (Redis-backed store):**
+
+| Variable | Description |
+|---|---|
+| `LEANMCP_STORE_TYPE` | Set to `redis` to use Redis; defaults to `memory` (single-instance only) |
+| `LEANMCP_REDIS_URL` | Redis connection URL, e.g. `redis://redis:6379` |
+
+**Start the proxy:**
+
+```sh
+LEANMCP_UPSTREAM_MCP_URL=http://upstream:8080/mcp \
+LEANMCP_CACHE_SECRET=dev-secret \
+go run ./cmd/leanmcp
+```
+
+Point your MCP client at `http://localhost:8080/mcp`. The proxy is transparent — no client
+changes are required.
+
+**Observability:**
+
+Prometheus metrics are served at `http://localhost:8080/metrics`. Scrape this endpoint to
+track token savings, cache hit rates, and latency.
+
+**Start with shadow mode:**
+
+Set `LEANMCP_SHADOW_MODE=true` (or `shadow_mode: true` in `leanmcp.example.yaml`) to compact
+results and measure savings *without* returning handles to the model. This lets you validate
+the token reduction in your environment before enabling handle-only mode.
 
 ## Status
 
-Pre-implementation. See [`docs/design`](docs/design) for the full design, token-savings
-analysis, and rollout plan.
+Implemented and tested; not yet validated in production. The proxy, lossless tabular
+compaction, credential-bound expand handles, the pluggable store (in-memory + Redis),
+Prometheus metrics, and container/Kubernetes packaging are all in place, with unit
+tests across packages. Roll out in shadow mode first (the default) and measure before
+enabling handle-only mode. See [`docs/design`](docs/design) for the full design,
+token-savings analysis, and rollout plan.
 
 ## License
 

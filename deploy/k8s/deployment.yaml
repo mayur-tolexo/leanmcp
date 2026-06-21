@@ -1,0 +1,51 @@
+# Prerequisites: a Secret named "leanmcp-secrets" with key "cache-secret" must exist
+# in the same namespace, and a reachable Redis instance at redis://redis:6379.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leanmcp
+  labels:
+    app: leanmcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: leanmcp
+  template:
+    metadata:
+      labels:
+        app: leanmcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: leanmcp
+          image: leanmcp:dev
+          ports:
+            - containerPort: 8080
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          env:
+            - name: LEANMCP_UPSTREAM_MCP_URL
+              value: "http://upstream-mcp:8080/mcp"
+            - name: LEANMCP_STORE_TYPE
+              value: "redis"
+            - name: LEANMCP_REDIS_URL
+              value: "redis://redis:6379"
+            - name: LEANMCP_CACHE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: leanmcp-secrets
+                  key: cache-secret
+            - name: LEANMCP_SHADOW_MODE
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080

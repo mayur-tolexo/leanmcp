@@ -39,7 +39,7 @@ func proxyClientSession(t *testing.T, upstreamURL string, cfg *config.Config) *m
 	cfg.UpstreamMCPURL = upstreamURL
 	st := store.NewMemory()
 	up := upstream.New(upstreamURL)
-	srv := NewServer(cfg, up, st, cfg.CacheSecret)
+	srv := NewServer(cfg, up, st, cfg.CacheSecret, nil)
 
 	h := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

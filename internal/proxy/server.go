@@ -7,6 +7,7 @@ import (
 
 	"github.com/mayur-tolexo/leanmcp/internal/config"
 	"github.com/mayur-tolexo/leanmcp/internal/cred"
+	"github.com/mayur-tolexo/leanmcp/internal/metrics"
 	"github.com/mayur-tolexo/leanmcp/internal/upstream"
 	"github.com/mayur-tolexo/leanmcp/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,15 +23,17 @@ var expandToolDef = &mcp.Tool{
 // NewServer assembles the leanmcp proxy MCP server. It registers expand_result
 // as a typed tool and installs receiving middleware that proxies tools/list and
 // tools/call to the upstream while applying compaction. cacheSecret keys the
-// per-credential hash that binds cache handles.
-func NewServer(cfg *config.Config, up *upstream.Client, st store.Store, cacheSecret string) *mcp.Server {
+// per-credential hash that binds cache handles. m may be nil to disable metrics.
+func NewServer(cfg *config.Config, up *upstream.Client, st store.Store, cacheSecret string, m *metrics.Metrics) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "leanmcp", Version: "0.1.0"}, &mcp.ServerOptions{HasTools: true})
 
-	opt := newOptimizer(st, cfg)
+	opt := newOptimizer(st, cfg, m)
 
 	// Register expand_result. The handler derives the caller's credential hash
 	// from the inbound bearer, expands the stored result, and returns it as text;
 	// any error is surfaced as an error result rather than a transport failure.
+	// RecordExpand is called only on a successful expand so the counter reflects
+	// actual retrievals, not failed lookups.
 	mcp.AddTool(srv, expandToolDef,
 		func(ctx context.Context, req *mcp.CallToolRequest, args ExpandArgs) (*mcp.CallToolResult, any, error) {
 			credHash := cred.HMAC(cacheSecret, bearerFromExtra(req.Extra))
@@ -41,6 +44,7 @@ func NewServer(cfg *config.Config, up *upstream.Client, st store.Store, cacheSec
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
 				}, nil, nil
 			}
+			m.RecordExpand()
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 		})
 

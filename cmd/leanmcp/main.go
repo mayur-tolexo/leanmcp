@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mayur-tolexo/leanmcp/internal/config"
+	"github.com/mayur-tolexo/leanmcp/internal/metrics"
 	"github.com/mayur-tolexo/leanmcp/internal/proxy"
 	"github.com/mayur-tolexo/leanmcp/internal/upstream"
 	"github.com/mayur-tolexo/leanmcp/store"
@@ -44,7 +45,12 @@ func main() {
 		log.Println("warning: cache_secret is empty; expand handles will be weakly bound (dev only)")
 	}
 
-	srv := proxy.NewServer(cfg, upstream.New(cfg.UpstreamMCPURL), st, cfg.CacheSecret)
+	// Initialise Prometheus metrics collectors; all counters/histograms are
+	// registered on a private registry so the default Go runtime metrics are
+	// not exposed alongside leanmcp's own metrics.
+	m := metrics.New()
+
+	srv := proxy.NewServer(cfg, upstream.New(cfg.UpstreamMCPURL), st, cfg.CacheSecret, m)
 
 	// Serve the proxy MCP server over a stateless, JSON Streamable HTTP handler.
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv },
@@ -54,6 +60,7 @@ func main() {
 	mux.Handle("/healthz", healthHandler())
 	mux.Handle("/readyz", healthHandler())
 	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/metrics", m.Handler())
 
 	// ReadHeaderTimeout bounds slow-header (slow-loris) clients. WriteTimeout is
 	// left unset because a single /mcp request proxies a tools/call to the

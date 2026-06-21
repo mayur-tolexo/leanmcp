@@ -6,19 +6,22 @@ import (
 
 	"github.com/mayur-tolexo/leanmcp/internal/compact"
 	"github.com/mayur-tolexo/leanmcp/internal/config"
+	"github.com/mayur-tolexo/leanmcp/internal/metrics"
 	"github.com/mayur-tolexo/leanmcp/internal/tokens"
 	"github.com/mayur-tolexo/leanmcp/store"
 )
 
 // optimizer applies the heavy-result decision logic for a single tool call.
 type optimizer struct {
-	store store.Store
-	cfg   *config.Config
+	store   store.Store
+	cfg     *config.Config
+	metrics *metrics.Metrics
 }
 
-// newOptimizer constructs an optimizer backed by s and governed by cfg.
-func newOptimizer(s store.Store, cfg *config.Config) *optimizer {
-	return &optimizer{store: s, cfg: cfg}
+// newOptimizer constructs an optimizer backed by s, governed by cfg, and
+// reporting to m (nil disables metrics).
+func newOptimizer(s store.Store, cfg *config.Config, m *metrics.Metrics) *optimizer {
+	return &optimizer{store: s, cfg: cfg, metrics: m}
 }
 
 // outcome is the result of optimizing one tool call.
@@ -46,6 +49,16 @@ func (o *optimizer) process(ctx context.Context, credHash, tool string, raw []by
 	}
 	res := compact.Compact(raw, compact.Options{Mode: mode})
 
+	// Determine the effective compacted size for metrics: use View length when
+	// compaction applied, otherwise treat the size as equal to the original.
+	compactedSize := len(raw)
+	if res.Applied {
+		compactedSize = len(res.View)
+	}
+	// Record compaction sizes for all heavy results (including shadow/oversize) so
+	// the metric captures would-be savings regardless of whether caching proceeds.
+	o.metrics.RecordCompaction(tool, len(raw), compactedSize)
+
 	// If no transform shrank the payload, pass the full result through untouched.
 	// Appending a trailer here would make the returned text larger than the
 	// original for no compaction benefit, violating the never-enlarge guarantee.
@@ -56,6 +69,7 @@ func (o *optimizer) process(ctx context.Context, credHash, tool string, raw []by
 	// Refuse to cache payloads that exceed the configured hard size limit; return
 	// the full raw so the caller still gets a valid (if large) response.
 	if len(raw) > o.cfg.MaxRawBytes {
+		o.metrics.RecordFailOpen("oversize")
 		return outcome{Text: string(raw)}, nil
 	}
 
@@ -69,6 +83,7 @@ func (o *optimizer) process(ctx context.Context, credHash, tool string, raw []by
 	handle, err := o.store.Put(ctx, credHash, raw, int(o.cfg.ExpandTTL.Seconds()))
 	if err != nil {
 		// Fail open: return full raw if caching is unavailable.
+		o.metrics.RecordFailOpen("store_error")
 		return outcome{Text: string(raw)}, nil
 	}
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mayur-tolexo/leanmcp/internal/config"
+	"github.com/mayur-tolexo/leanmcp/internal/metrics"
 	"github.com/mayur-tolexo/leanmcp/store"
 )
 
@@ -39,7 +40,7 @@ func bigArray() []byte {
 }
 
 func TestOptimizeSmallPassesThrough(t *testing.T) {
-	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 1500, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 1500, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20}, nil)
 	out, err := o.process(context.Background(), "credA", "small-tool", []byte(`{"ok":true}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -51,7 +52,7 @@ func TestOptimizeSmallPassesThrough(t *testing.T) {
 
 func TestOptimizeHeavyCompactsAndCaches(t *testing.T) {
 	mem := store.NewMemory()
-	o := newOptimizer(mem, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	o := newOptimizer(mem, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20}, nil)
 	out, err := o.process(context.Background(), "credA", "list-tool", bigArray())
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -71,7 +72,7 @@ func TestOptimizeHeavyCompactsAndCaches(t *testing.T) {
 }
 
 func TestOptimizeOversizeFailsOpen(t *testing.T) {
-	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 1, ExpandTTL: time.Minute, MaxRawBytes: 10})
+	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 1, ExpandTTL: time.Minute, MaxRawBytes: 10}, nil)
 	raw := bigArray()
 	out, err := o.process(context.Background(), "credA", "list-tool", raw)
 	if err != nil {
@@ -103,7 +104,7 @@ func bigObject() []byte {
 }
 
 func TestOptimizeHeavyButUncompactablePassesThrough(t *testing.T) {
-	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20}, nil)
 	raw := bigObject()
 	out, err := o.process(context.Background(), "credA", "obj-tool", raw)
 	if err != nil {
@@ -123,7 +124,7 @@ func TestOptimizeHeavyButUncompactablePassesThrough(t *testing.T) {
 }
 
 func TestOptimizeStoreErrorFailsOpen(t *testing.T) {
-	o := newOptimizer(failingStore{}, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	o := newOptimizer(failingStore{}, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20}, nil)
 	raw := bigArray()
 	out, err := o.process(context.Background(), "credA", "list-tool", raw)
 	if err != nil {
@@ -139,7 +140,7 @@ func TestOptimizeStoreErrorFailsOpen(t *testing.T) {
 
 func TestShadowModeReturnsFullButCaches(t *testing.T) {
 	mem := store.NewMemory()
-	o := newOptimizer(mem, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20, ShadowMode: true})
+	o := newOptimizer(mem, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20, ShadowMode: true}, nil)
 	out, err := o.process(context.Background(), "credA", "list-tool", bigArray())
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -149,5 +150,20 @@ func TestShadowModeReturnsFullButCaches(t *testing.T) {
 	}
 	if !strings.Contains(out.Text, `"status":"active"`) {
 		t.Fatalf("shadow must return full result")
+	}
+}
+
+// TestMetricsEnabledOptimizerNoPanic verifies that an optimizer wired with a
+// real *Metrics processes a heavy compactable array without panicking, and that
+// the metrics handler is non-nil after recording.
+func TestMetricsEnabledOptimizerNoPanic(t *testing.T) {
+	m := metrics.New()
+	o := newOptimizer(store.NewMemory(), &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20}, m)
+	_, err := o.process(context.Background(), "credA", "list-tool", bigArray())
+	if err != nil {
+		t.Fatalf("process with metrics: %v", err)
+	}
+	if m.Handler() == nil {
+		t.Fatal("metrics handler must be non-nil after recording")
 	}
 }

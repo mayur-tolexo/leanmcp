@@ -1,7 +1,7 @@
 # leanmcp — Design
 
 **Date:** 2026-06-21
-**Status:** Approved design, pre-implementation
+**Status:** Approved design, implemented
 **Module:** `github.com/mayur-tolexo/leanmcp`
 
 ## 1. Problem

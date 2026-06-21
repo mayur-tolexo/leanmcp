@@ -86,8 +86,12 @@ the token reduction in your environment before enabling handle-only mode.
 
 ## Status
 
-Pre-implementation. See [`docs/design`](docs/design) for the full design, token-savings
-analysis, and rollout plan.
+Implemented and tested; not yet validated in production. The proxy, lossless tabular
+compaction, credential-bound expand handles, the pluggable store (in-memory + Redis),
+Prometheus metrics, and container/Kubernetes packaging are all in place, with unit
+tests across packages. Roll out in shadow mode first (the default) and measure before
+enabling handle-only mode. See [`docs/design`](docs/design) for the full design,
+token-savings analysis, and rollout plan.
 
 ## License
 

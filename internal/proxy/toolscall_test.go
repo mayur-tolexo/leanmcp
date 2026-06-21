@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,19 @@ import (
 	"github.com/mayur-tolexo/leanmcp/internal/config"
 	"github.com/mayur-tolexo/leanmcp/store"
 )
+
+// failingStore always errors on Put, simulating an unavailable backend.
+type failingStore struct{}
+
+// Put always fails so the optimizer's fail-open path can be exercised.
+func (failingStore) Put(context.Context, string, []byte, int) (string, error) {
+	return "", errors.New("store down")
+}
+
+// Get always reports not found; unused by the fail-open test.
+func (failingStore) Get(context.Context, string) (*store.Entry, error) {
+	return nil, store.ErrNotFound
+}
 
 func bigArray() []byte {
 	var b strings.Builder
@@ -67,6 +81,21 @@ func TestOptimizeOversizeFailsOpen(t *testing.T) {
 	}
 	if out.Text != string(raw) {
 		t.Fatalf("oversize must return full raw")
+	}
+}
+
+func TestOptimizeStoreErrorFailsOpen(t *testing.T) {
+	o := newOptimizer(failingStore{}, &config.Config{OptimizeThresholdTokens: 100, ExpandTTL: time.Minute, MaxRawBytes: 1 << 20})
+	raw := bigArray()
+	out, err := o.process(context.Background(), "credA", "list-tool", raw)
+	if err != nil {
+		t.Fatalf("store error must not propagate: %v", err)
+	}
+	if out.Handle != "" || out.Compacted {
+		t.Fatalf("store error must fail open with no handle: %+v", out)
+	}
+	if out.Text != string(raw) {
+		t.Fatalf("store error must return full raw result")
 	}
 }
 

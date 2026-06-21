@@ -1,8 +1,19 @@
+// Command leanmcp runs the leanmcp optimizing MCP proxy: it loads configuration,
+// builds the cache store and upstream client, assembles the proxy MCP server, and
+// serves it over Streamable HTTP alongside health endpoints.
 package main
 
 import (
 	"log"
 	"net/http"
+	"os"
+	"time"
+
+	"github.com/mayur-tolexo/leanmcp/internal/config"
+	"github.com/mayur-tolexo/leanmcp/internal/proxy"
+	"github.com/mayur-tolexo/leanmcp/internal/upstream"
+	"github.com/mayur-tolexo/leanmcp/store"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // healthHandler returns a handler that reports liveness with a 200 "ok".
@@ -13,11 +24,45 @@ func healthHandler() http.Handler {
 	})
 }
 
-// main wires the HTTP mux and starts the server. Real wiring is added in later phases.
+// main loads config, constructs the proxy server, mounts health and /mcp routes,
+// and serves until the process is terminated.
 func main() {
+	cfg, err := config.Load(os.Getenv("LEANMCP_CONFIG"))
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+
+	// Build the cache store backing compacted-result handles.
+	st, err := store.New(cfg.Store.Type, cfg.Store.RedisURL)
+	if err != nil {
+		log.Fatalf("init store: %v", err)
+	}
+
+	// Warn when no cache secret is set: handles are then bound by a weak key and
+	// this is acceptable only for local development.
+	if cfg.CacheSecret == "" {
+		log.Println("warning: cache_secret is empty; expand handles will be weakly bound (dev only)")
+	}
+
+	srv := proxy.NewServer(cfg, upstream.New(cfg.UpstreamMCPURL), st, cfg.CacheSecret)
+
+	// Serve the proxy MCP server over a stateless, JSON Streamable HTTP handler.
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", healthHandler())
 	mux.Handle("/readyz", healthHandler())
-	log.Println("leanmcp listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	mux.Handle("/mcp", mcpHandler)
+
+	httpSrv := &http.Server{
+		Addr:         cfg.ListenAddr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	log.Printf("leanmcp listening on %s (upstream %s)", cfg.ListenAddr, cfg.UpstreamMCPURL)
+	log.Fatal(httpSrv.ListenAndServe())
 }

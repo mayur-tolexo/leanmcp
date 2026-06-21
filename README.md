@@ -37,10 +37,14 @@ Client ──expand_result(handle, path?)──▶ leanmcp ──▶ Redis ─�
 - **Lossless first.** v1 compaction never drops data without a handle to recover it.
   LLM summarization is deliberately excluded (roughly break-even on tokens, adds latency).
 - **No API changes.** Pure infrastructure in front of any MCP server.
-- **Fail open.** Any internal failure (Redis down, oversized payload, etc.) returns the
+- **Fail open.** Any internal failure (store down, oversized payload, etc.) returns the
   full, correct result — optimization is best-effort, never a correctness risk.
-- **Identity-scoped.** Cache handles are namespaced to a verified caller identity so a
-  handle can never be expanded by another caller.
+- **Credential-bound handles.** A cache handle is bound to a keyed hash of the caller's
+  credential and can be redeemed only by presenting the same credential — so a leaked
+  handle is useless to anyone else. leanmcp never verifies or interprets the credential
+  (it just forwards it upstream), so it works with any auth system out of the box.
+- **Pluggable storage.** The cache is a narrow `Store` interface (Redis + in-memory
+  reference impls); bring your own backend by implementing two methods.
 
 ## Status
 

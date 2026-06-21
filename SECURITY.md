@@ -21,16 +21,19 @@ remediation progress. Once a fix is available, we will coordinate disclosure wit
 leanmcp is a transparent proxy that caches full tool-call results to support
 expand-on-demand. Security-relevant properties we care about:
 
-- **Handle isolation.** Cached results are namespaced to a verified caller identity. A
-  cache handle must never be usable by a different caller. Reports of cross-identity
-  handle access are high severity.
-- **Credential handling.** leanmcp forwards the caller's credential to the upstream and
-  verifies it to derive identity. It must not log, persist, or leak credentials.
+- **Handle isolation.** Each cache handle is bound to a keyed hash of the caller's
+  credential and may be redeemed only by presenting the same credential. A handle must
+  never be usable by a different caller. Reports of cross-caller handle redemption are
+  high severity.
+- **Credential handling.** leanmcp forwards the caller's credential to the upstream
+  unchanged and computes a keyed hash of it solely to bind handles. It does not verify or
+  interpret the credential, and must not log, persist, or leak the credential itself (only
+  a hash prefix may appear in audit logs).
 - **Cache lifetime.** Cached raw results use a short TTL and are evicted; reports of
-  unbounded retention or data surviving credential revocation are in scope.
-- **Fail-open behavior.** Optimization failures must not change authorization outcomes —
-  leanmcp adds no new authorization decisions beyond identity verification for handle
-  scoping.
+  unbounded retention are in scope. Note the post-revocation window is bounded by the TTL
+  (see the design doc, §8.1).
+- **Fail-open behavior.** Optimization failures must not change outcomes — leanmcp makes
+  no authorization decisions; the upstream remains the sole authority.
 
 Out of scope: vulnerabilities in upstream MCP servers, the MCP client, or Redis itself
 (report those to their respective projects), and issues requiring a compromised host.

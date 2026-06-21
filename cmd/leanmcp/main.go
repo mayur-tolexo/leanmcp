@@ -55,12 +55,15 @@ func main() {
 	mux.Handle("/readyz", healthHandler())
 	mux.Handle("/mcp", mcpHandler)
 
+	// ReadHeaderTimeout bounds slow-header (slow-loris) clients. WriteTimeout is
+	// left unset because a single /mcp request proxies a tools/call to the
+	// upstream whose duration is unbounded from the proxy's view; a fixed write
+	// deadline would truncate legitimately long tool responses mid-stream.
 	httpSrv := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              cfg.ListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Printf("leanmcp listening on %s (upstream %s)", cfg.ListenAddr, cfg.UpstreamMCPURL)

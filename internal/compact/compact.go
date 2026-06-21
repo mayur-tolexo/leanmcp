@@ -28,6 +28,11 @@ func Compact(raw []byte, opts Options) Result {
 		if err != nil || !applied {
 			return res
 		}
+		// Never emit a payload larger than the original: for small inputs the
+		// table wrapper overhead can exceed the savings, so keep the original.
+		if len(out) >= len(raw) {
+			return res
+		}
 		res.View = out
 		res.Applied = true
 		res.CompactBytes = len(out)

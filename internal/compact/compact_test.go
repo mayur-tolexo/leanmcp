@@ -17,6 +17,22 @@ func TestCompactTabularMode(t *testing.T) {
 	}
 }
 
+func TestCompactSmallArrayNotEnlarged(t *testing.T) {
+	// A 2-object array compacts to a larger table (wrapper overhead), so Compact
+	// must keep the original and report not-applied rather than emit a bigger payload.
+	in := []byte(`[{"id":"1","name":"a"},{"id":"2","name":"b"}]`)
+	res := Compact(in, Options{Mode: "tabular"})
+	if res.Applied {
+		t.Fatalf("must not apply a transform that enlarges the payload")
+	}
+	if string(res.View) != string(in) {
+		t.Fatalf("must return the original payload unchanged")
+	}
+	if res.CompactBytes != res.OriginalBytes {
+		t.Fatalf("CompactBytes should equal OriginalBytes when not applied")
+	}
+}
+
 func TestCompactNoneMode(t *testing.T) {
 	in := []byte(`[{"id":"1"}]`)
 	res := Compact(in, Options{Mode: "none"})

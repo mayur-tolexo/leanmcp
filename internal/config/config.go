@@ -18,11 +18,17 @@ type ToolRule struct {
 	KeepFields []string `yaml:"keep_fields"` // opt-in lossy projection; off by default
 }
 
+// StoreConfig selects the cache backend.
+type StoreConfig struct {
+	Type     string `yaml:"type"`      // "memory" (default) | "redis"
+	RedisURL string `yaml:"redis_url"` // required when Type is "redis"
+}
+
 // Config is the full runtime configuration.
 type Config struct {
 	UpstreamMCPURL          string              `yaml:"upstream_mcp_url"`
-	RedisURL                string              `yaml:"redis_url"`
-	VerifyEndpoint          string              `yaml:"verify_endpoint"` // empty => static/dev verifier
+	CacheSecret             string              `yaml:"cache_secret"`
+	Store                   StoreConfig         `yaml:"store"`
 	OptimizeThresholdTokens int                 `yaml:"optimize_threshold_tokens"`
 	ExpandTTL               time.Duration       `yaml:"expand_ttl"`
 	MaxRawBytes             int                 `yaml:"max_raw_bytes"`
@@ -41,6 +47,9 @@ func Load(path string) (*Config, error) {
 		ShadowMode:              true,
 		ListenAddr:              ":8080",
 		Tools:                   map[string]ToolRule{},
+		Store: StoreConfig{
+			Type: "memory",
+		},
 	}
 	if path != "" {
 		b, err := os.ReadFile(path)
@@ -63,11 +72,14 @@ func overlayEnv(cfg *Config) {
 	if v := os.Getenv("LEANMCP_UPSTREAM_MCP_URL"); v != "" {
 		cfg.UpstreamMCPURL = v
 	}
-	if v := os.Getenv("LEANMCP_REDIS_URL"); v != "" {
-		cfg.RedisURL = v
+	if v := os.Getenv("LEANMCP_CACHE_SECRET"); v != "" {
+		cfg.CacheSecret = v
 	}
-	if v := os.Getenv("LEANMCP_VERIFY_ENDPOINT"); v != "" {
-		cfg.VerifyEndpoint = v
+	if v := os.Getenv("LEANMCP_STORE_TYPE"); v != "" {
+		cfg.Store.Type = v
+	}
+	if v := os.Getenv("LEANMCP_REDIS_URL"); v != "" {
+		cfg.Store.RedisURL = v
 	}
 	if v := os.Getenv("LEANMCP_LISTEN_ADDR"); v != "" {
 		cfg.ListenAddr = v
